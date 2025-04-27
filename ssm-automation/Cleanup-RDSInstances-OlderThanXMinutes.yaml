@@ -46,6 +46,9 @@ mainSteps:
                 if not create_time_str:
                     continue
 
+                if instance.get('DBInstanceStatus') not in ['available', 'stopped']:
+                    continue
+
                 create_time = datetime.fromisoformat(create_time_str.replace('Z', '+00:00'))
                 age = events.get('Age', 5)
                 if now - create_time >= timedelta(minutes=age):
