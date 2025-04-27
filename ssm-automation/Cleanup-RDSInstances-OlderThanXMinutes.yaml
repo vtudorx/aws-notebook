@@ -1,0 +1,95 @@
+schemaVersion: '0.3'
+description: Discover and terminate RDS instances older than X minutes in the current AWS account.
+parameters:
+  age:
+    type: Integer
+    description: How old? (minutes)
+    default: 5
+  iam:
+    type: String
+    description: ARN of IAM Role
+assumeRole: '{{ iam }}'
+mainSteps:
+  - name: DescribeDBInstances
+    action: aws:executeAwsApi
+    nextStep: FilterInstancesToBeTerminated
+    isEnd: false
+    inputs:
+      Service: rds
+      Api: DescribeDBInstances
+    outputs:
+      - Name: DBInstances
+        Selector: $.DBInstances
+        Type: MapList
+  - name: FilterInstancesToBeTerminated
+    action: aws:executeScript
+    timeoutSeconds: 30
+    nextStep: CheckIfInstancesFound
+    isCritical: false
+    isEnd: false
+    inputs:
+      Runtime: python3.11
+      Handler: script_handler
+      InputPayload:
+        DbInstances: '{{ DescribeDBInstances.DBInstances }}'
+        Age: '{{ age }}'
+      Script: |-
+        from datetime import datetime, timezone, timedelta
+
+        def script_handler(events, context):
+            db_instances = events.get('DbInstances', [])
+            now = datetime.now(timezone.utc)
+            inst_to_terminate = []
+
+            for instance in db_instances:
+                create_time_str = instance.get('InstanceCreateTime')
+                if not create_time_str:
+                    continue
+
+                create_time = datetime.fromisoformat(create_time_str.replace('Z', '+00:00'))
+                age = events.get('Age', 5)
+                if now - create_time >= timedelta(minutes=age):
+                    inst_to_terminate.append(instance['DBInstanceIdentifier'])
+
+            return { "DbInstancesToTerminate": inst_to_terminate, "InstanceCount": len(inst_to_terminate)}
+    outputs:
+      - Type: StringList
+        Name: DbInstancesToTerminate
+        Selector: $.Payload.DbInstancesToTerminate
+      - Type: Integer
+        Name: InstanceCount
+        Selector: $.Payload.InstanceCount
+  - name: CheckIfInstancesFound
+    action: aws:branch
+    inputs:
+      Choices:
+        - NextStep: Loop
+          Variable: '{{ FilterInstancesToBeTerminated.InstanceCount }}'
+          NumericGreater: 0
+      Default: EndAutomation
+  - name: Loop
+    action: aws:loop
+    nextStep: EndAutomation
+    isEnd: false
+    inputs:
+      Iterators: '{{ FilterInstancesToBeTerminated.DbInstancesToTerminate }}'
+      Steps:
+        - name: DeleteDBInstance
+          action: aws:executeAwsApi
+          isEnd: true
+          inputs:
+            Service: rds
+            Api: DeleteDBInstance
+            DBInstanceIdentifier: '{{ Loop.CurrentIteratorValue }}'
+            SkipFinalSnapshot: true
+  - name: EndAutomation
+    action: aws:executeScript
+    isEnd: true
+    timeoutSeconds: 10
+    inputs:
+      Runtime: python3.11
+      Handler: script_handler
+      Script: |-
+        def script_handler(events, context):
+            # no-op
+            return {}
